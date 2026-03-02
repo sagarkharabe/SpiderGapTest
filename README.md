@@ -1,68 +1,90 @@
-[![tested with jest](https://img.shields.io/badge/tested_with-jest-99424f.svg)](https://github.com/facebook/jest) [![jest](https://jestjs.io/img/jest-badge.svg)](https://github.com/facebook/jest)
-
 ```mermaid
 classDiagram
     direction TB
 
-    %% Core Services
+    %% --- External Systems & Infrastructure ---
+    class GlobalInstrumentStack {
+        <<Service>>
+        +getInstrument(symbol, exchange)
+        +validateMarketHours(exchange)
+        +getLotSize(instrumentId)
+    }
+
+    class LedgerSystem {
+        <<Service>>
+        +placeOrderHold(v_order_id, amount)
+        +fillOrder(v_order_id, fillDelta)
+        +releaseOrderHold(v_order_id)
+        +creditDividend(user_id, amount)
+    }
+
+    %% --- Core OMS Orchestration ---
     class OrderOrchestrator {
-        -instrumentClient: IInstrumentStack
-        -ledgerClient: ILedgerService
+        <<Controller>>
         -adapter: IProviderAdapter
-        +createOrder(OrderRequest) v_order_id
+        +createOrder(OrderRequest)
         +validateTrade(Order) bool
         +processExecution(ProviderEvent)
         +handleSync()
     }
 
     class ExecutionHandler {
-        -db: Database
+        <<Logic Engine>>
         +isDuplicate(execution_id) bool
         +calculateFillDelta(Payload) delta
-        +updateCostBasis(v_order_id, fill)
-        +triggerLedger(v_order_id, delta)
+        +updateUserCostBasis(fill)
+        +recordTransaction(fill)
     }
 
-    class SSEHandler {
-        -orchestrator: OrderOrchestrator
-        +onMessage(json)
-        +reconnect()
-    }
-
-    class ReconciliationWorker {
-        -adapter: IProviderAdapter
-        +pollOpenOrders()
-        +syncOrderState(v_order_id)
-    }
-
-    %% Interfaces and Adapters
+    %% --- Integration & Resilience Layer ---
     class IProviderAdapter {
-        <<interface>>
+        <<Interface>>
         +placeOrder(Order)
         +cancelOrder(externalId)
         +getOrderDetails(v_order_id)
     }
 
     class GTNAdapter {
-        -restClient: HTTPClient
+        <<Adapter>>
         +mapStatus(gtnCode)
         +estimateCharges(Order)
+        +parseSSE(json)
     }
 
-    %% Data Entities
+    class SSEHandler {
+        <<Event Listener>>
+        +onOrderUpdate(json)
+        +onConnectionDrop()
+    }
+
+    class ReconciliationWorker {
+        <<Background Job>>
+        +pollPendingOrders()
+        +reconcileMissedFills(v_order_id)
+    }
+
+    %% --- Non-Order Event Handling ---
+    class CorporateActionProcessor {
+        <<Event Processor>>
+        +handleDividend(json)
+        +handleStockSplit(json)
+        +processTaxWithholding(json)
+    }
+
+    %% --- Unified Data Entities (Persistence) ---
     class Order {
         +v_order_id: UUID
         +user_id: UUID
-        +status: OrderStatus
-        +cumulative_filled_qty: Decimal
+        +status: Enum (NEW, PARTIAL, FILLED)
+        +cumulative_qty: Decimal
         +avg_price: Decimal
     }
 
     class Transaction {
         +transaction_id: UUID
-        +v_order_id: UUID
+        +v_order_id: UUID (optional)
         +provider_transaction_id: String (execution_id)
-        +type: Enum (TRADE, COMMISSION)
+        +type: Enum (TRADE, COMMISSION, DIVIDEND, TAX)
         +amount: Decimal
     }
 
@@ -74,21 +96,20 @@ classDiagram
         +avg_buy_price: Decimal
     }
 
-    class OrderAuditTrail {
-        +v_order_id: UUID
-        +from_status: Status
-        +to_status: Status
-        +raw_payload: JSON
-    }
-
-    %% Relationships
-    OrderOrchestrator --> IProviderAdapter : delegates
-    OrderOrchestrator --> ExecutionHandler : uses
-    IProviderAdapter <|.. GTNAdapter : implements
-    SSEHandler --> OrderOrchestrator : triggers
-    ReconciliationWorker --> IProviderAdapter : polls
-    ExecutionHandler --> Transaction : writes
-    ExecutionHandler --> UserCostBasis : updates
-    OrderOrchestrator --> OrderAuditTrail : logs
-    OrderOrchestrator ..> Order : manages
+    %% --- Relationships & Flow ---
+    OrderOrchestrator --> GlobalInstrumentStack : Validates Symbol/Hours
+    OrderOrchestrator --> LedgerSystem : Blocks Funds (OHLD)
+    OrderOrchestrator --> IProviderAdapter : Dispatches Trade
+    IProviderAdapter <|.. GTNAdapter : GTN Implementation
+    
+    SSEHandler --> OrderOrchestrator : Pushes Real-time Fills
+    ReconciliationWorker --> GTNAdapter : Pulls Status (Fallback)
+    
+    OrderOrchestrator --> ExecutionHandler : Logic Delegation
+    ExecutionHandler --> Transaction : Records Granular Fills
+    ExecutionHandler --> UserCostBasis : Updates Internal Book
+    
+    CorporateActionProcessor --> Transaction : Records Dividends/Splits
+    CorporateActionProcessor --> UserCostBasis : Adjusts Qty/Avg Price
+    CorporateActionProcessor --> LedgerSystem : Credits Sub-Account
 ```
