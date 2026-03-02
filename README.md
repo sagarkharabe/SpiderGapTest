@@ -2,30 +2,13 @@
 classDiagram
     direction TB
 
-    %% --- External Systems & Infrastructure ---
-    class GlobalInstrumentStack {
-        <<Service>>
-        +getInstrument(symbol, exchange)
-        +validateMarketHours(exchange)
-        +getLotSize(instrumentId)
-    }
-
-    class LedgerSystem {
-        <<Service>>
-        +placeOrderHold(v_order_id, amount)
-        +fillOrder(v_order_id, fillDelta)
-        +releaseOrderHold(v_order_id)
-        +creditDividend(user_id, amount)
-    }
-
-    %% --- Core OMS Orchestration ---
+    %% Central Controllers and Logic
     class OrderOrchestrator {
         <<Controller>>
         -adapter: IProviderAdapter
         +createOrder(OrderRequest)
         +validateTrade(Order) bool
         +processExecution(ProviderEvent)
-        +handleSync()
     }
 
     class ExecutionHandler {
@@ -36,34 +19,6 @@ classDiagram
         +recordTransaction(fill)
     }
 
-    %% --- Integration & Resilience Layer ---
-    class IProviderAdapter {
-        <<Interface>>
-        +placeOrder(Order)
-        +cancelOrder(externalId)
-        +getOrderDetails(v_order_id)
-    }
-
-    class GTNAdapter {
-        <<Adapter>>
-        +mapStatus(gtnCode)
-        +estimateCharges(Order)
-        +parseSSE(json)
-    }
-
-    class SSEHandler {
-        <<Event Listener>>
-        +onOrderUpdate(json)
-        +onConnectionDrop()
-    }
-
-    class ReconciliationWorker {
-        <<Background Job>>
-        +pollPendingOrders()
-        +reconcileMissedFills(v_order_id)
-    }
-
-    %% --- Non-Order Event Handling ---
     class CorporateActionProcessor {
         <<Event Processor>>
         +handleDividend(json)
@@ -71,45 +26,87 @@ classDiagram
         +processTaxWithholding(json)
     }
 
-    %% --- Unified Data Entities (Persistence) ---
-    class Order {
-        +v_order_id: UUID
-        +user_id: UUID
-        +status: Enum (NEW, PARTIAL, FILLED)
-        +cumulative_qty: Decimal
-        +avg_price: Decimal
+    %% Integration and Recovery
+    class SSEHandler {
+        <<Event Listener>>
+        +onOrderUpdate(json)
+        +onCorporateEvent(json)
     }
 
-    class Transaction {
-        +transaction_id: UUID
-        +v_order_id: UUID (optional)
-        +provider_transaction_id: String (execution_id)
-        +type: Enum (TRADE, COMMISSION, DIVIDEND, TAX)
-        +amount: Decimal
+    class IProviderAdapter {
+        <<Interface>>
+        +placeOrder(Order)
+        +getOrderDetails(v_order_id)
+    }
+
+    class GTNAdapter {
+        <<Adapter>>
+        +mapStatus(gtnCode)
+        +parseSSE(json)
+    }
+
+    class ReconciliationWorker {
+        <<Background Job>>
+        +pollPendingOrders()
+    }
+
+    %% Core Services
+    class GlobalInstrumentStack {
+        <<Service>>
+        +getInstrument(symbol, exchange)
+    }
+
+    class LedgerSystem {
+        <<Service>>
+        +placeOrderHold(v_order_id, amount)
+        +fillOrder(v_order_id, fillDelta)
+        +creditDividend(user_id, amount)
+    }
+
+    %% Data Entities
+    class Order {
+        <<Entity>>
+        +v_order_id: UUID
+        +status: Enum
+        +cumulative_qty: Decimal
     }
 
     class UserCostBasis {
-        +user_id: UUID
-        +instrument_id: UUID
+        <<Entity>>
         +total_quantity: Decimal
-        +total_cost_basis: Decimal
         +avg_buy_price: Decimal
     }
 
-    %% --- Relationships & Flow ---
-    OrderOrchestrator --> GlobalInstrumentStack : Validates Symbol/Hours
-    OrderOrchestrator --> LedgerSystem : Blocks Funds (OHLD)
-    OrderOrchestrator --> IProviderAdapter : Dispatches Trade
-    IProviderAdapter <|.. GTNAdapter : GTN Implementation
+    class Transaction {
+        <<Entity>>
+        +type: Enum
+        +provider_transaction_id: String
+    }
+
+    %% Relationships and Critical Connections
     
-    SSEHandler --> OrderOrchestrator : Pushes Real-time Fills
+    %% Event Ingestion
+    SSEHandler --> OrderOrchestrator : Pushes Trade Fills
+    SSEHandler --> CorporateActionProcessor : Pushes Corp Events
     ReconciliationWorker --> GTNAdapter : Pulls Status (Fallback)
     
+    %% Orchestration Flow
+    OrderOrchestrator --> Order : Manages State
+    OrderOrchestrator --> IProviderAdapter : Dispatches Trade
+    OrderOrchestrator --> GlobalInstrumentStack : Validates Symbol
+    OrderOrchestrator --> LedgerSystem : Blocks Funds (OHLD)
     OrderOrchestrator --> ExecutionHandler : Logic Delegation
-    ExecutionHandler --> Transaction : Records Granular Fills
-    ExecutionHandler --> UserCostBasis : Updates Internal Book
+    
+    %% Implementation
+    IProviderAdapter <|.. GTNAdapter : Implements
+    GTNAdapter <.. ReconciliationWorker : Uses
+    
+    %% Post-Trade and Corporate Action Execution
+    ExecutionHandler --> Transaction : Records Fills
+    ExecutionHandler --> UserCostBasis : Updates Book
+    ExecutionHandler --> LedgerSystem : Finalizes Funds (OFIL)
     
     CorporateActionProcessor --> Transaction : Records Dividends/Splits
-    CorporateActionProcessor --> UserCostBasis : Adjusts Qty/Avg Price
+    CorporateActionProcessor --> UserCostBasis : Adjusts Qty/Price
     CorporateActionProcessor --> LedgerSystem : Credits Sub-Account
 ```
